@@ -1,27 +1,37 @@
+# src/main.py
+from contextlib import asynccontextmanager
+from typing import Annotated
+import os
+import pandas as pd
 from fastapi import FastAPI, HTTPException, Depends, Body
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from typing import Annotated
-from model import load_model, load_encoder
-import pandas as pd
+from src.model import load_model, load_encoder  # adjust if your path differs
 
-app = FastAPI()
+ml_models: dict = {}
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load once at startup
+    ml_models["ohe"] = load_encoder()
+    ml_models["model"] = load_model()
+    try:
+        yield
+    finally:
+        # Free memory at shutdown
+        ml_models.clear()
+
+app = FastAPI(lifespan=lifespan)
 bearer = HTTPBearer()
 
-def get_username_for_token(token):
-    if token == "abc123":
-        return "pedro1"
-    return None
-
+def get_username_for_token(token: str):
+    return "teteca" if token == os.getenv("API_TOKEN", "abc123") else None
 
 async def validate_token(credentials: HTTPAuthorizationCredentials = Depends(bearer)):
     token = credentials.credentials
-
     username = get_username_for_token(token)
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token")
-
     return {"username": username}
 
 class Person(BaseModel):
@@ -40,32 +50,17 @@ async def root():
 
 @app.post("/predict")
 async def predict(
-    person: Annotated[
-        Person,
-        Body(
-            examples=[
-                {
-                    "age": 42,
-                    "job": "entrepreneur",
-                    "marital": "married",
-                    "education": "primary",
-                    "balance": 558,
-                    "housing": "yes",
-                    "duration": 186,
-                    "campaign": 2,
-                }
-            ],
-        ),
-    ],
-    user=Depends(validate_token),
+    person: Annotated[Person, Body(examples=[{
+        "age": 42, "job": "entrepreneur", "marital": "married",
+        "education": "primary", "balance": 558, "housing": "yes",
+        "duration": 186, "campaign": 2
+    }])],
+    user = Depends(validate_token),
 ):
-    ohe = load_encoder()
-    model = load_model()
+    ohe = ml_models["ohe"]
+    model = ml_models["model"]
 
-    person_t = ohe.transform(pd.DataFrame([person.dict()]))
-    pred = model.predict(person_t)[0]
-
-    return {
-        "prediction": str(pred),
-        "username": user["username"]
-        }
+    df = pd.DataFrame([person.model_dump() if hasattr(person, "model_dump") else person.dict()])
+    X = ohe.transform(df)
+    pred = model.predict(X)[0]
+    return {"prediction": str(pred), "username": user["username"]}
